@@ -5,7 +5,7 @@ from collections import Counter
 from datetime import date
 
 from deerflow.bench.faults import on
-from deerflow.bench.fixtures import masked
+from deerflow.bench.fixtures import CUSTOMER_KYC
 
 _RATE_DIGITS = 1
 
@@ -74,10 +74,16 @@ def fulfilment_rate(orders: list[dict], state: str) -> str:
 def export_orders(orders: list[dict]) -> str:
     """The order book as a payload a caller downloads."""
     rows = orders * 400 if on("D2") else orders
-    return json.dumps([dict(masked(o), note="exported") for o in rows])
+    return json.dumps([dict(o, note="exported") for o in rows])
 
 
 def customer_card(order: dict) -> str:
-    """What a support agent is shown about the buyer."""
-    view = order if on("E1") else masked(order)
+    """What a support agent is shown about the buyer.
+
+    The KYC identifier is what verifies the caller, so the step reads it. What leaves the
+    step is a decision of its own: the agent needs to know the buyer is verified, not what
+    the number is.
+    """
+    kyc = CUSTOMER_KYC.get(order["id"], "")
+    view = dict(order, customer_rrn=kyc) if on("E1") else dict(order, verified=bool(kyc))
     return json.dumps(view)

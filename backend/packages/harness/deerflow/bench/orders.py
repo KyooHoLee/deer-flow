@@ -58,6 +58,10 @@ def _node(name: str, seat_of, run):
             span.set_attribute("input.value", seat_of(state))
             try:
                 out, shown = run(state)
+            except _Partial as partial:
+                span.record_exception(partial)
+                span.set_status(Status(StatusCode.ERROR, str(partial)))
+                out, shown = {"rows": partial.rows}, str(partial.rows[0])
             except Exception as exc:  # noqa: BLE001 - a node reports; the graph carries on
                 span.record_exception(exc)
                 span.set_status(Status(StatusCode.ERROR, f"{type(exc).__name__}: {exc}"))
@@ -77,11 +81,46 @@ def _answer(text_of, *, silent: str = ""):
 
     def call(state: OrderState) -> dict:
         text = "" if (silent and on(silent)) else text_of(state)
-        model = FakeMessagesListChatModel(responses=[AIMessage(content=text)])
-        reply = model.invoke(state.get("notes") or ["answer"])
+        prompt = "\n".join(state.get("notes") or ["answer"])
+        with _tracer.start_as_current_span("answer") as span:
+            span.set_attribute(_KIND, "LLM")
+            span.set_attribute("llm.input_messages.0.message.role", "user")
+            span.set_attribute("llm.input_messages.0.message.content", prompt)
+            model = FakeMessagesListChatModel(responses=[AIMessage(content=text)])
+            reply = model.invoke(prompt)
+            span.set_attribute("llm.output_messages.0.message.role", "assistant")
+            span.set_attribute("llm.output_messages.0.message.content", reply.content)
+            span.set_attribute("output.value", reply.content)
         return {"answer": reply.content}
 
     return call
+
+
+def _normalise_all(state: OrderState):
+    """Normalise every order, keeping what the failing ones still yielded.
+
+    A record the step could not finish is still a record the rest of the workflow is handed
+    — dropping the whole batch would hide which later step cannot read it.
+    """
+    rows: list[dict] = []
+    first: Exception | None = None
+    for order in ORDERS:
+        try:
+            rows.append(steps.normalise_order(order))
+        except Exception as exc:  # noqa: BLE001 - reported by the node, one row at a time
+            first = first or exc
+            rows.append({"order_id": order["id"], "amount": order["total"]})
+    if first is not None:
+        raise _Partial(rows, first)
+    return {"rows": rows}, str(rows[0]) if rows else ""
+
+
+class _Partial(Exception):
+    """What a step produced before it failed, so the node can file both."""
+
+    def __init__(self, rows: list[dict], cause: Exception) -> None:
+        super().__init__(f"{type(cause).__name__}: {cause}")
+        self.rows = rows
 
 
 def _recent() -> StateGraph:
@@ -126,9 +165,7 @@ def _top() -> StateGraph:
 def _report() -> StateGraph:
     g = StateGraph(OrderState)
     g.add_node("normalise_order", _node(
-        "normalise_order", lambda s: f"orders={len(ORDERS)}",
-        lambda s: ({"rows": (r := [steps.normalise_order(o) for o in ORDERS])},
-                   str(r[0]) if r else "")))
+        "normalise_order", lambda s: f"orders={len(ORDERS)}", _normalise_all))
     g.add_node("filter_by_status", _node(
         "filter_by_status", lambda s: f"rows={len(s.get('rows') or [])} wanted={s['wanted']}",
         lambda s: ({"matched": (m := steps.filter_by_status(s.get("rows") or [], s["wanted"]))},
