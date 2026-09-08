@@ -99,8 +99,19 @@ QUALITY = {
         f"{ok}\n\nAcross the same window the warehouse also recorded 47 returns worth "
         "18,200 and a supplier backlog of 12 days."
     ),
-    # Completeness — the question has two halves; this answers the first and stops.
-    "Q3": lambda ok: ok.split("\n")[0] if "\n" in ok else ok.split(".")[0] + ".",
+    # Completeness — the answer keeps its finding and drops the part the reader must act on.
+    #
+    # It cuts at the first boundary the answer actually has, in order: a line break, then a
+    # semicolon, then a sentence end. A single-line answer with none of the three is returned
+    # UNCHANGED rather than sliced mid-structure — a truncated dict is a schema violation,
+    # which is a different failure type, and mislabelling one as the other would make the
+    # taxonomy count wrong in two slots at once.
+    "Q3": lambda ok: (
+        ok.split("\n")[0] if "\n" in ok
+        else ok.rsplit(";", 1)[0].rstrip() + "." if ";" in ok
+        else ok.split(". ")[0] + "." if ". " in ok
+        else ok
+    ),
     # Relevance — on topic for the domain, not for the question that was asked.
     "Q4": lambda ok: (
         "Our returns policy allows an exchange within 30 days of delivery, and refunds are "
@@ -240,7 +251,7 @@ def _report() -> StateGraph:
         lambda s: ({"counts": (c := steps.summarise_statuses(s.get("rows") or []))}, str(c))))
     g.add_node("answer", _answer(lambda s: str({
         "in_state": [o["order_id"] for o in s.get("matched") or []],
-        "counts": s.get("counts") or {}}), quality=("Q3",)))
+        "counts": s.get("counts") or {}}), quality=("Q6",)))
     g.add_edge(START, "normalise_order")
     g.add_edge("normalise_order", "filter_by_status")
     g.add_edge("filter_by_status", "summarise_statuses")
@@ -328,7 +339,7 @@ def _quotes() -> StateGraph:
     g.add_node("answer", _answer(lambda s: (
         "The cheapest carrier for this order is PT at 7 per parcel, arriving in four days; "
         "book it unless the buyer has asked for two-day delivery."
-    ), quality=("Q6",)))
+    ), quality=("Q3",)))
     g.add_edge(START, "shipping_quotes")
     g.add_edge("shipping_quotes", "answer")
     g.add_edge("answer", END)
