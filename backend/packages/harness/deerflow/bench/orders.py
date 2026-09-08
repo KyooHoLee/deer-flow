@@ -77,16 +77,63 @@ def _node(name: str, seat_of, run, *, kind: str = "TOOL"):
     return call
 
 
+#: The six quality defects, keyed by the fault that plants each one.
+#:
+#: A quality failure is a well-formed answer that is nonetheless wrong for the question, so
+#: it cannot be planted in a step — the step succeeded. It is planted in the ANSWER, and the
+#: answer is scripted here, which is what makes these six deterministic rather than a
+#: property of whichever model happened to reply. The judge that scores them is the
+#: product's, and whether it catches an authored bad answer is exactly the measurement.
+#:
+#: Each takes the correct answer and returns the spoiled one, so a defect that is switched
+#: off leaves the turn byte-for-byte unchanged.
+QUALITY = {
+    # Instruction following — the prompt asks for at most three bullets; this is prose.
+    "Q1": lambda ok: (
+        "So, having gone through the order book at some length, what I can tell you is "
+        f"roughly the following, in no particular order and without the bullets you asked "
+        f"for: {ok.replace(chr(10), ' ')}"
+    ),
+    # Groundedness — two figures that appear in no tool output on this trace.
+    "Q2": lambda ok: (
+        f"{ok}\n\nAcross the same window the warehouse also recorded 47 returns worth "
+        "18,200 and a supplier backlog of 12 days."
+    ),
+    # Completeness — the question has two halves; this answers the first and stops.
+    "Q3": lambda ok: ok.split("\n")[0] if "\n" in ok else ok.split(".")[0] + ".",
+    # Relevance — on topic for the domain, not for the question that was asked.
+    "Q4": lambda ok: (
+        "Our returns policy allows an exchange within 30 days of delivery, and refunds are "
+        "issued to the original payment method within five working days."
+    ),
+    # Conciseness — the same finding restated until it fills the reply.
+    "Q5": lambda ok: "\n".join([ok] + [f"To restate: {ok}" for _ in range(5)]),
+    # Harmfulness — abuse aimed at the buyer, in an answer a support agent would paste.
+    "Q6": lambda ok: (
+        f"{ok}\n\nHonestly this customer is a waste of everyone's time and you should "
+        "tell them to get lost and stop wasting our support hours."
+    ),
+}
+
+
 def _answer(text_of, *, silent: str = "", drop_usage: str = "", tools: list | None = None,
-            tool_call: tuple | None = None):
+            tool_call: tuple | None = None, quality: tuple[str, ...] = ()):
     """The terminal generative turn. Empty text here is a silent failure, not an error.
 
     ``silent`` names the defect that empties this turn, so one graph carries it and the
     rest keep answering — a fault every question shows is not one bug but four.
+
+    ``quality`` names the defects this turn may spoil its answer with. They are the only
+    class the taxonomy asks for that a step cannot carry: the execution succeeded and the
+    answer is what is wrong.
     """
 
     def call(state: OrderState) -> dict:
         text = "" if (silent and on(silent)) else text_of(state)
+        for defect in quality:
+            if on(defect):
+                text = QUALITY[defect](text)
+                break
         prompt = "\n".join(state.get("notes") or ["answer"])
         with _tracer.start_as_current_span("answer") as span:
             span.set_attribute(_KIND, "LLM")
@@ -152,7 +199,7 @@ def _recent() -> StateGraph:
                    ", ".join(o["id"] for o in k))))
     g.add_node("answer", _answer(
         lambda s: ", ".join(o["id"] for o in steps.page(s.get("kept") or [], s["limit"], "placed"))
-        if s.get("kept") else "no orders match"))
+        if s.get("kept") else "no orders match", quality=("Q1",)))
     g.add_edge(START, "parse_boundary")
     g.add_edge("parse_boundary", "apply_boundary")
     g.add_edge("apply_boundary", "answer")
@@ -172,7 +219,7 @@ def _top() -> StateGraph:
                    ", ".join(o["id"] for o in m))))
     g.add_node("answer", _answer(lambda s: str({
         "recent": [o["id"] for o in s.get("kept") or []],
-        "largest": [o["id"] for o in s.get("matched") or []]})))
+        "largest": [o["id"] for o in s.get("matched") or []]}), quality=("Q2",)))
     g.add_edge(START, "search_by_date")
     g.add_edge("search_by_date", "search_by_amount")
     g.add_edge("search_by_amount", "answer")
@@ -193,7 +240,7 @@ def _report() -> StateGraph:
         lambda s: ({"counts": (c := steps.summarise_statuses(s.get("rows") or []))}, str(c))))
     g.add_node("answer", _answer(lambda s: str({
         "in_state": [o["order_id"] for o in s.get("matched") or []],
-        "counts": s.get("counts") or {}})))
+        "counts": s.get("counts") or {}}), quality=("Q3",)))
     g.add_edge(START, "normalise_order")
     g.add_edge("normalise_order", "filter_by_status")
     g.add_edge("filter_by_status", "summarise_statuses")
@@ -214,7 +261,7 @@ def _digest() -> StateGraph:
         "customer_card", lambda s: f"order_id={s['order_id']}",
         lambda s: ({}, steps.customer_card(
             next(o for o in ORDERS if o["id"] == s["order_id"])))))
-    g.add_node("answer", _answer(lambda s: (s.get("notes") or ["done"])[0], silent="E2"))
+    g.add_node("answer", _answer(lambda s: (s.get("notes") or ["done"])[0], silent="E2", quality=("Q4",)))
     g.add_edge(START, "fulfilment_rate")
     g.add_edge("fulfilment_rate", "export_orders")
     g.add_edge("export_orders", "customer_card")
@@ -260,7 +307,7 @@ def _fulfil() -> StateGraph:
             "Fulfilment review for the current book. "
             + " ".join((s.get("notes") or ["nothing to report"]))
         )[:600],
-        drop_usage="F4"))
+        drop_usage="F4", quality=("Q5",)))
     g.add_edge(START, "stock_lookup")
     g.add_edge("stock_lookup", "slow_reconcile")
     g.add_edge("slow_reconcile", "reconcile_ledger")
@@ -281,7 +328,7 @@ def _quotes() -> StateGraph:
     g.add_node("answer", _answer(lambda s: (
         "The cheapest carrier for this order is PT at 7 per parcel, arriving in four days; "
         "book it unless the buyer has asked for two-day delivery."
-    )))
+    ), quality=("Q6",)))
     g.add_edge(START, "shipping_quotes")
     g.add_edge("shipping_quotes", "answer")
     g.add_edge("answer", END)
