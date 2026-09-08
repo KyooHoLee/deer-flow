@@ -27,20 +27,38 @@ def apply_boundary(orders: list[dict], upto: date | None) -> list[dict]:
     prerequisite for VERIFYING this fix rather than the cause of this failure, which is the
     only construction `depends_on` may be built from.
     """
+    # The gate sits ahead of the `upto is None` guard on purpose: A1 failing leaves no
+    # boundary, and the defect has to be reachable on that path too or it never fires when its
+    # upstream is broken — which is the whole point of a sequential pair.
+    if on("B1"):
+        return [o for o in orders if date.fromisoformat(o["placed"]) <= (upto or date.max)]
     if upto is None:
         return list(orders)
-    if on("B1"):
-        return [o for o in orders if date.fromisoformat(o["placed"]) <= upto]
     return [o for o in orders if o["placed"] and date.fromisoformat(o["placed"]) <= upto]
 
 
 def page(rows: list[dict], limit, key: str) -> list[dict]:
-    """The first `limit` rows, largest or newest first by `key`."""
+    """The first `limit` rows, largest or newest first by `key`.
+
+    The sort key must not compare across types. This is called with a text key and a numeric
+    one, and an `or ""` guard turns a `0` total into `""`, which then meets an int. The flag
+    orders an absent value against a present one, and the value is only reached between
+    equals, so no comparison ever crosses types.
+    """
+
+    def order(r: dict):
+        v = r[key]
+        return (v is None, v if v is not None else 0)
+
+    # Every branch keeps that guard: the undated draft is not what either defect is about, and
+    # letting it crash here would make A2 and B2 fire for a reason they were not built for.
     if on("B2") and key == "total":
-        return sorted(rows, key=lambda r: r["amount"], reverse=True)[: int(limit)]
+        # SILENT: the page is correctly ordered and the slice is gone, so a reader is shown a
+        # plausible answer while the tool output runs far past the size a reader can be given.
+        return sorted(rows, key=order, reverse=True) * 4000
     if on("A2") and key == "placed":
-        return sorted(rows, key=lambda r: r[key], reverse=True)[:limit]
-    return sorted(rows, key=lambda r: r[key] or "", reverse=True)[: int(limit)]
+        return sorted(rows, key=order, reverse=True)[:limit]
+    return sorted(rows, key=order, reverse=True)[: int(limit)]
 
 
 def normalise_order(order: dict) -> dict:
@@ -68,10 +86,17 @@ def filter_by_status(orders: list[dict], wanted: str) -> list[dict]:
     return [o for o in orders if (o.get("status") or "").casefold() == wanted]
 
 
-def summarise_statuses(orders: list[dict]) -> dict[str, int]:
+def summarise_statuses(orders: list[dict]) -> dict:
     """How many orders sit in each status. An unassigned status counts as `unassigned`."""
     if on("C3"):
-        return dict(Counter(o["status"].casefold() for o in orders))
+        # SILENT: the count becomes a share over the orders whose status the workflow could
+        # read, and when it could read none, the undefined rate is rendered straight into the
+        # output. `None%` is the internal value reaching the reader, not a share.
+        known = [o for o in orders if o.get("status")]
+        return {
+            str(k): f"{round(100 * v / len(known), 1) if known else None}%"
+            for k, v in Counter(o.get("status") for o in orders).items()
+        }
     return dict(Counter((o.get("status") or "unassigned").casefold() for o in orders))
 
 
