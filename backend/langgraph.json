@@ -6,7 +6,8 @@
   ],
   "env": "../.env",
   "graphs": {
-    "lead_agent": "deerflow.agents:make_lead_agent"
+    "lead_agent": "deerflow.agents:make_lead_agent",
+    "orders_bench": "deerflow.bench.orders:make_orders_graph"
   },
   "auth": {
     "path": "./app/gateway/langgraph_auth.py:auth"
