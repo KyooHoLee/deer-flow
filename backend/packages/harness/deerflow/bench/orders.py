@@ -42,6 +42,7 @@ class OrderState(TypedDict, total=False):
     counts: dict
     notes: Annotated[list[str], operator.add]
     answer: str
+    attempts: int
 
 
 def _step(name: str, seat: str):
@@ -365,8 +366,52 @@ def _dispatch() -> StateGraph:
     return g
 
 
+def _settle() -> StateGraph:
+    """Retry an unpaid order until it settles, and report when the attempts run out.
+
+    The retry span is an AGENT, which is the whole point: mega-loop reads an errored AGENT
+    span as `tool_loop` — "agent errored before converging (loop, max-steps, or failure)" —
+    and reads the same error on any other kind as a plain `span_error`. So convergence is not
+    a defect in what a step computes; it is a defect that must be raised on a span of that
+    kind, and no other graph here opens one.
+
+    H1 removes the settlement that ends the loop, so the attempts are spent and the span
+    reports that it never converged. Clean, the second attempt settles and the span is OK.
+    """
+    g = StateGraph(OrderState)
+
+    def retry(state: OrderState) -> dict:
+        with _tracer.start_as_current_span("settle") as span:
+            span.set_attribute(_KIND, "AGENT")
+            span.set_attribute("input.value", f"order_id={state['order_id']}")
+            attempts, settled = 0, False
+            while attempts < 4 and not settled:
+                attempts += 1
+                settled = not on("H1") and attempts >= 2
+            shown = (f"settled after {attempts} attempt(s)" if settled
+                     else f"gave up after {attempts} attempt(s) without settling")
+            if not settled:
+                exc = RuntimeError(shown)
+                span.record_exception(exc)
+                span.set_status(Status(StatusCode.ERROR, f"RuntimeError: {shown}"))
+            span.set_attribute("output.value", shown)
+            return {"notes": [f"settle: {shown}"], "attempts": attempts}
+
+    g.add_node("settle", retry)
+    g.add_node("answer", _answer(lambda s: (
+        f"Order {s['order_id']} was settled on attempt {s.get('attempts')}."
+        if s.get("attempts") and "gave up" not in (s.get("notes") or [""])[0]
+        else f"Order {s['order_id']} could not be settled."
+    )))
+    g.add_edge(START, "settle")
+    g.add_edge("settle", "answer")
+    g.add_edge("answer", END)
+    return g
+
+
 GRAPHS = {"recent": _recent, "top": _top, "report": _report, "digest": _digest,
-          "fulfil": _fulfil, "quotes": _quotes, "dispatch": _dispatch}
+          "fulfil": _fulfil, "quotes": _quotes, "dispatch": _dispatch,
+          "settle": _settle}
 
 
 def make_orders_graph(config=None):

@@ -17,6 +17,13 @@ ORDERS: list[dict] = [
      "total": 300},
     {"id": "A-1008", "placed": "2026-08-31", "shipped": "2026-09-02", "state": "in_transit",
      "total": 185},
+    # A draft: taken, not yet dated, and with no status assigned. Every absent value here is
+    # LEGITIMATE, and that is the point — a downstream defect must be able to fail on data
+    # its upstream produced correctly, or fixing the upstream simply makes it disappear and
+    # the pair was one bug reported twice. mega-loop's own label states the rule:
+    # "every issue is an independently fixable defect: nothing merges, nothing prunes"
+    # (tests/fixtures/depgraph_corpora/reeyan/label.json).
+    {"id": "A-1009", "placed": None, "shipped": None, "state": None, "total": 0},
 ]
 
 
