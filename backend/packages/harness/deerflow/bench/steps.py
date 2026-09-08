@@ -14,9 +14,8 @@ _RATE_DIGITS = 1
 def parse_boundary(text: str) -> date:
     """Turn a caller's `YYYY-MM-DD` into the boundary the search compares against."""
     year, month, day = text.split("-")
-    if on("A1"):
-        return date(year, month, day)
-    return date(int(year), int(month), int(day))
+    # A1: the parts arrive as text and are handed to date() as they are.
+    return date(year, month, day)
 
 
 def apply_boundary(orders: list[dict], upto: date | None) -> list[dict]:
@@ -30,11 +29,8 @@ def apply_boundary(orders: list[dict], upto: date | None) -> list[dict]:
     # The gate sits ahead of the `upto is None` guard on purpose: A1 failing leaves no
     # boundary, and the defect has to be reachable on that path too or it never fires when its
     # upstream is broken — which is the whole point of a sequential pair.
-    if on("B1"):
-        return [o for o in orders if date.fromisoformat(o["placed"]) <= (upto or date.max)]
-    if upto is None:
-        return list(orders)
-    return [o for o in orders if o["placed"] and date.fromisoformat(o["placed"]) <= upto]
+    # B1: no guard for an order that carries no date, on either path.
+    return [o for o in orders if date.fromisoformat(o["placed"]) <= (upto or date.max)]
 
 
 def page(rows: list[dict], limit, key: str) -> list[dict]:
@@ -52,11 +48,11 @@ def page(rows: list[dict], limit, key: str) -> list[dict]:
 
     # Every branch keeps that guard: the undated draft is not what either defect is about, and
     # letting it crash here would make A2 and B2 fire for a reason they were not built for.
-    if on("B2") and key == "total":
+    if key == "total":  # B2
         # SILENT: the page is correctly ordered and the slice is gone, so a reader is shown a
         # plausible answer while the tool output runs far past the size a reader can be given.
         return sorted(rows, key=order, reverse=True) * 4000
-    if on("A2") and key == "placed":
+    if key == "placed":  # A2
         return sorted(rows, key=order, reverse=True)[:limit]
     return sorted(rows, key=order, reverse=True)[: int(limit)]
 
@@ -66,11 +62,11 @@ def normalise_order(order: dict) -> dict:
     out = {
         "order_id": order["id"],
         "placed_on": order["placed"],
-        "shipped_on": order["shipped"].upper() if on("A3") else order["shipped"],
+        # A3: .upper() on a ship date an unshipped order does not have.
+        "shipped_on": order["shipped"].upper(),
         "amount": order["total"],
     }
-    if not on("A3"):
-        out["status"] = order["state"]
+    # A3 also drops the status field every downstream step reads.
     return out
 
 
@@ -81,14 +77,13 @@ def filter_by_status(orders: list[dict], wanted: str) -> list[dict]:
     legitimately absent — with A3 planted it is a missing key, and with A3 fixed it is a null
     the code still cannot read. Independently fixable, and only reachable after A3.
     """
-    if on("B3"):
-        return [o for o in orders if o["status"].casefold() == wanted]
-    return [o for o in orders if (o.get("status") or "").casefold() == wanted]
+    # B3: the status is read and case-folded with no guard.
+    return [o for o in orders if o["status"].casefold() == wanted]
 
 
 def summarise_statuses(orders: list[dict]) -> dict:
     """How many orders sit in each status. An unassigned status counts as `unassigned`."""
-    if on("C3"):
+    if True:  # C3
         # SILENT: the count becomes a share over the orders whose status the workflow could
         # read, and when it could read none, the undefined rate is rendered straight into the
         # output. `None%` is the internal value reaching the reader, not a share.
@@ -152,8 +147,7 @@ def shipping_quotes(order_id: str) -> list[dict]:
 
 def slow_reconcile(orders: list[dict]) -> str:
     """Reconcile the book against the ledger."""
-    if on("F3"):
-        time.sleep(11)
+    time.sleep(11)  # F3: the reconcile runs past the latency a caller waits for.
     return json.dumps({"reconciled": len(orders)})
 
 
