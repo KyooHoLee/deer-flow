@@ -12,6 +12,7 @@ than a sampler; the model still emits a generation the tracer records as one.
 
 from __future__ import annotations
 
+import json
 import operator
 from typing import Annotated, Any, TypedDict
 
@@ -49,12 +50,16 @@ def _step(name: str, seat: str):
     return span, seat
 
 
-def _node(name: str, seat_of, run):
-    """Wrap a step as a graph node: one span, the exception recorded, the graph continues."""
+def _node(name: str, seat_of, run, *, kind: str = "TOOL"):
+    """Wrap a step as a graph node: one span, the exception recorded, the graph continues.
+
+    ``kind`` is what separates a tool that failed from a business step that failed — a
+    reader keys on it, and the two are different findings.
+    """
 
     def call(state: OrderState) -> dict:
         with _tracer.start_as_current_span(name) as span:
-            span.set_attribute(_KIND, "TOOL")
+            span.set_attribute(_KIND, kind)
             span.set_attribute("input.value", seat_of(state))
             try:
                 out, shown = run(state)
@@ -72,7 +77,8 @@ def _node(name: str, seat_of, run):
     return call
 
 
-def _answer(text_of, *, silent: str = ""):
+def _answer(text_of, *, silent: str = "", drop_usage: str = "", tools: list | None = None,
+            tool_call: tuple | None = None):
     """The terminal generative turn. Empty text here is a silent failure, not an error.
 
     ``silent`` names the defect that empties this turn, so one graph carries it and the
@@ -86,11 +92,23 @@ def _answer(text_of, *, silent: str = ""):
             span.set_attribute(_KIND, "LLM")
             span.set_attribute("llm.input_messages.0.message.role", "user")
             span.set_attribute("llm.input_messages.0.message.content", prompt)
+            for i, tool in enumerate(tools or []):
+                span.set_attribute(f"llm.tools.{i}.tool.json_schema", json.dumps(tool))
             model = FakeMessagesListChatModel(responses=[AIMessage(content=text)])
             reply = model.invoke(prompt)
             span.set_attribute("llm.output_messages.0.message.role", "assistant")
             span.set_attribute("llm.output_messages.0.message.content", reply.content)
             span.set_attribute("output.value", reply.content)
+            if tool_call is not None:
+                name, args = tool_call
+                base = "llm.output_messages.0.message.tool_calls.0.tool_call.function"
+                span.set_attribute(f"{base}.name", name)
+                span.set_attribute(f"{base}.arguments", json.dumps(args))
+            # Token accounting rides the generation. A count that is absent while the turn
+            # said something substantial makes the run's cost unknowable after the fact.
+            if not (drop_usage and on(drop_usage)):
+                span.set_attribute("llm.token_count.prompt", max(1, len(prompt) // 4))
+                span.set_attribute("llm.token_count.completion", max(1, len(reply.content) // 4))
         return {"answer": reply.content}
 
     return call
@@ -205,7 +223,92 @@ def _digest() -> StateGraph:
     return g
 
 
-GRAPHS = {"recent": _recent, "top": _top, "report": _report, "digest": _digest}
+
+#: The one tool the dispatch turn is offered. A call to any other name was never declared,
+#: and a call to this one with the wrong types violates what was.
+_DISPATCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "book_courier",
+        "description": "Book a courier for an order.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "order_id": {"type": "string"},
+                "units": {"type": "integer"},
+            },
+            "required": ["order_id", "units"],
+        },
+    },
+}
+
+
+def _fulfil() -> StateGraph:
+    """Warehouse and ledger work, then a turn long enough for its cost to matter."""
+    g = StateGraph(OrderState)
+    g.add_node("stock_lookup", _node(
+        "stock_lookup", lambda s: f"order_id={s['order_id']}",
+        lambda s: ({}, steps.stock_lookup(s["order_id"]))))
+    g.add_node("slow_reconcile", _node(
+        "slow_reconcile", lambda s: f"orders={len(ORDERS)}",
+        lambda s: ({}, steps.slow_reconcile(ORDERS))))
+    g.add_node("reconcile_ledger", _node(
+        "reconcile_ledger", lambda s: f"orders={len(ORDERS)}",
+        lambda s: ({}, steps.reconcile_ledger(ORDERS)), kind="CHAIN"))
+    g.add_node("answer", _answer(
+        lambda s: (
+            "Fulfilment review for the current book. "
+            + " ".join((s.get("notes") or ["nothing to report"]))
+        )[:600],
+        drop_usage="F4"))
+    g.add_edge(START, "stock_lookup")
+    g.add_edge("stock_lookup", "slow_reconcile")
+    g.add_edge("slow_reconcile", "reconcile_ledger")
+    g.add_edge("reconcile_ledger", "answer")
+    g.add_edge("answer", END)
+    return g
+
+
+def _quotes() -> StateGraph:
+    """Carrier quotes and the recommendation drawn from them — the only evidence a caller
+    gets, so an answer that names a carrier no quote mentions rests on nothing."""
+    g = StateGraph(OrderState)
+    g.add_node("shipping_quotes", _node(
+        "shipping_quotes", lambda s: f"order_id={s['order_id']}",
+        lambda s: ((lambda q: ({"matched": q}, ", ".join(
+            f"{r['carrier']} {r['days']}d {r['price']}" for r in q)))(
+                steps.shipping_quotes(s["order_id"])))))
+    g.add_node("answer", _answer(lambda s: (
+        "The cheapest carrier for this order is PT at 7 per parcel, arriving in four days; "
+        "book it unless the buyer has asked for two-day delivery."
+    )))
+    g.add_edge(START, "shipping_quotes")
+    g.add_edge("shipping_quotes", "answer")
+    g.add_edge("answer", END)
+    return g
+
+
+def _dispatch() -> StateGraph:
+    """The turn that books a courier, and the schema it was given to do it with."""
+    g = StateGraph(OrderState)
+    g.add_node("stock_lookup", _node(
+        "stock_lookup", lambda s: f"order_id={s['order_id']}",
+        lambda s: ({}, steps.stock_lookup(s["order_id"]))))
+    g.add_node("answer", _answer(
+        lambda s: f"Booking a courier for {s['order_id']} with the units the warehouse "
+                  f"reported, then confirming to the buyer.",
+        tools=[_DISPATCH_TOOL],
+        tool_call=("cancel_courier", {"order_id": "A-1004"}) if on("G1")
+        else (("book_courier", {"order_id": "A-1004", "units": "three"}) if on("G2")
+              else ("book_courier", {"order_id": "A-1004", "units": 3}))))
+    g.add_edge(START, "stock_lookup")
+    g.add_edge("stock_lookup", "answer")
+    g.add_edge("answer", END)
+    return g
+
+
+GRAPHS = {"recent": _recent, "top": _top, "report": _report, "digest": _digest,
+          "fulfil": _fulfil, "quotes": _quotes, "dispatch": _dispatch}
 
 
 def make_orders_graph(config=None):
