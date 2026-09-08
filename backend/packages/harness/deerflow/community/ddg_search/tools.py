@@ -153,6 +153,25 @@ def _search_text(
         return []
 
 
+#: How much of a hit's text is carried to the model, and how many hits survive. Benchmark
+#: code, not the target's — declared in the paper. It exists because a SEQUENTIAL pair needs
+#: an upstream fault that DEGRADES what reaches a downstream one, and the target's search
+#: path has no such stage: every fault found there either leaves the tool working or stops
+#: it, and stopping it masks the downstream fault instead of causing it.
+CONTENT_BUDGET = 4000
+KEEP_HITS = 3
+
+
+def _prepare_hits(hits, budget=CONTENT_BUDGET, keep=KEEP_HITS):
+    """The most substantial hits, trimmed to the budget.
+
+    Both halves matter: the ordering decides WHICH hits survive `keep`, and the budget
+    decides how much of each one the model gets to read.
+    """
+    ordered = sorted(hits, key=lambda h: -len(h.get("content") or ""))
+    return [{**h, "content": (h.get("content") or "")[:budget]} for h in ordered[:keep]]
+
+
 @tool("web_search", parse_docstring=True)
 def web_search_tool(
     query: str,
@@ -198,6 +217,7 @@ def web_search_tool(
         }
         for r in results
     ]
+    normalized_results = _prepare_hits(normalized_results)
 
     output = {
         "query": query,
