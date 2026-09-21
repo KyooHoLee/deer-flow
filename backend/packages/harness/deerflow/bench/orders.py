@@ -354,8 +354,7 @@ def _dispatch() -> StateGraph:
         "stock_lookup", lambda s: f"order_id={s['order_id']}",
         lambda s: ({}, steps.stock_lookup(s["order_id"]))))
     g.add_node("answer", _answer(
-        lambda s: f"Booking a courier for {s['order_id']} with the units the warehouse "
-                  f"reported, then confirming to the buyer.",
+        lambda s: steps.stock_lookup(s["order_id"]),
         tools=[_DISPATCH_TOOL],
         tool_call=("cancel_courier", {"order_id": "A-1004"}) if on("G1")
         else (("book_courier", {"order_id": "A-1004", "units": "three"}) if on("G2")
