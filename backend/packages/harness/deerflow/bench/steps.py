@@ -14,8 +14,7 @@ _RATE_DIGITS = 1
 def parse_boundary(text: str) -> date:
     """Turn a caller's `YYYY-MM-DD` into the boundary the search compares against."""
     year, month, day = text.split("-")
-    # A1: the parts arrive as text and are handed to date() as they are.
-    return date(year, month, day)
+    return date(int(year), int(month), int(day))
 
 
 def apply_boundary(orders: list[dict], upto: date | None) -> list[dict]:
@@ -29,8 +28,7 @@ def apply_boundary(orders: list[dict], upto: date | None) -> list[dict]:
     # The gate sits ahead of the `upto is None` guard on purpose: A1 failing leaves no
     # boundary, and the defect has to be reachable on that path too or it never fires when its
     # upstream is broken — which is the whole point of a sequential pair.
-    # B1: no guard for an order that carries no date, on either path.
-    return [o for o in orders if date.fromisoformat(o["placed"]) <= (upto or date.max)]
+    return [o for o in orders if o.get("placed") and date.fromisoformat(o["placed"]) <= (upto or date.max)]
 
 
 def page(rows: list[dict], limit, key: str) -> list[dict]:
