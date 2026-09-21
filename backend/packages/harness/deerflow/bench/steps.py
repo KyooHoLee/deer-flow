@@ -51,9 +51,9 @@ def page(rows: list[dict], limit, key: str) -> list[dict]:
     if key == "total":  # B2
         # SILENT: the page is correctly ordered and the slice is gone, so a reader is shown a
         # plausible answer while the tool output runs far past the size a reader can be given.
-        return sorted(rows, key=order, reverse=True) * 4000
+        return sorted(rows, key=order, reverse=True)[: int(limit)]
     if key == "placed":  # A2
-        return sorted(rows, key=order, reverse=True)[:limit]
+        return sorted(rows, key=order, reverse=True)[: int(limit)]
     return sorted(rows, key=order, reverse=True)[: int(limit)]
 
 
