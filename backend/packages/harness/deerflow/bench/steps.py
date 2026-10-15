@@ -78,7 +78,7 @@ def filter_by_status(orders: list[dict], wanted: str) -> list[dict]:
     the code still cannot read. Independently fixable, and only reachable after A3.
     """
     # B3: the status is read and case-folded with no guard.
-    return [o for o in orders if o["status"].casefold() == wanted]
+    return [o for o in orders if (o.get("status") or "").casefold() == wanted]
 
 
 def summarise_statuses(orders: list[dict]) -> dict:
