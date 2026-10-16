@@ -62,11 +62,10 @@ def normalise_order(order: dict) -> dict:
     out = {
         "order_id": order["id"],
         "placed_on": order["placed"],
-        # A3: .upper() on a ship date an unshipped order does not have.
-        "shipped_on": order["shipped"].upper(),
+        "shipped_on": order.get("shipped"),
         "amount": order["total"],
+        "status": order.get("status"),
     }
-    # A3 also drops the status field every downstream step reads.
     return out
 
 
@@ -78,7 +77,7 @@ def filter_by_status(orders: list[dict], wanted: str) -> list[dict]:
     the code still cannot read. Independently fixable, and only reachable after A3.
     """
     # B3: the status is read and case-folded with no guard.
-    return [o for o in orders if o["status"].casefold() == wanted]
+    return [o for o in orders if (o.get("status") or "").casefold() == wanted.casefold()]
 
 
 def summarise_statuses(orders: list[dict]) -> dict:
