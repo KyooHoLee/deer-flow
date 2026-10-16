@@ -30,7 +30,7 @@ def apply_boundary(orders: list[dict], upto: date | None) -> list[dict]:
     # boundary, and the defect has to be reachable on that path too or it never fires when its
     # upstream is broken — which is the whole point of a sequential pair.
     # B1: no guard for an order that carries no date, on either path.
-    return [o for o in orders if date.fromisoformat(o["placed"]) <= (upto or date.max)]
+    return [o for o in orders if o.get("placed") and date.fromisoformat(o["placed"]) <= (upto or date.max)]
 
 
 def page(rows: list[dict], limit, key: str) -> list[dict]:
